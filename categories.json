@@ -1,0 +1,6 @@
+[
+  {"id": "birthday", "name": "Birthday", "bucket": "decent-de1-birthday"},
+  {"id": "espresso", "name": "Espresso", "bucket": "decent-de1-espresso"},
+  {"id": "landscapes", "name": "Landscapes", "bucket": "decent-de1-landscapes"},
+  {"id": "newyear", "name": "NewYear", "bucket": "decent-de1-newyear"}
+]

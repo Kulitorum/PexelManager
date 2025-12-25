@@ -145,6 +145,24 @@ void ProjectManager::closeProject()
     emit projectClosed();
 }
 
+bool ProjectManager::deleteProject(const QString& path)
+{
+    // Close project if it's the current one
+    if (m_project.path == path) {
+        m_project = Project();
+        emit projectClosed();
+    }
+
+    // Clear last project path if it matches
+    if (Settings::instance().lastProjectPath() == path) {
+        Settings::instance().setLastProjectPath("");
+    }
+
+    // Recursively delete project directory
+    QDir dir(path);
+    return dir.removeRecursively();
+}
+
 void ProjectManager::addVideos(const QList<VideoMetadata>& videos)
 {
     for (auto video : videos) {

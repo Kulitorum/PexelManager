@@ -4,6 +4,7 @@
 #include <QProcess>
 #include <QQueue>
 #include <QMap>
+#include "videometadata.h"
 
 class UploadManager : public QObject
 {
@@ -16,6 +17,10 @@ public:
                     int targetWidth, int targetHeight, int crf, const QString& preset);
     void uploadToS3(int videoId, const QString& localPath, const QString& bucket, const QString& key);
     void uploadIndexJson(const QString& bucket, const QString& projectName);
+    void uploadCatalogJson(const QString& bucket, const QList<VideoMetadata>& videos);
+    void uploadCategoriesJson(const QString& bucket, const QString& projectName);
+    void deleteS3Bucket(const QString& bucket);
+    void removeCategoryAndUpload(const QString& bucket);
     void cancelAll();
 
     bool isBusy() const { return !m_runningScales.isEmpty() || !m_runningUploads.isEmpty() || !m_scaleQueue.isEmpty() || !m_uploadQueue.isEmpty(); }
@@ -35,6 +40,12 @@ signals:
     void indexUploadCompleted();
     void indexUploadError(const QString& error);
 
+    void categoriesUploadCompleted();
+    void categoriesUploadError(const QString& error);
+
+    void s3DeleteCompleted(const QString& bucket);
+    void s3DeleteError(const QString& bucket, const QString& error);
+
     void allTasksCompleted();
 
 private slots:
@@ -47,7 +58,7 @@ private:
     void startScaleTasks();
     void startUploadTasks();
 
-    enum TaskType { Scale, Upload, IndexUpload };
+    enum TaskType { Scale, Upload, IndexUpload, CatalogUpload, CategoriesUpload, S3Delete };
 
     struct Task {
         TaskType type;
@@ -72,4 +83,6 @@ private:
     QQueue<Task> m_uploadQueue;
 
     QString m_tempIndexPath;
+    QString m_tempCatalogPath;
+    QString m_tempCategoriesPath;
 };

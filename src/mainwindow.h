@@ -33,7 +33,9 @@ private slots:
     void onOpenProject();
     void onSaveProject();
     void onResetProject();
+    void onDeleteProject();
     void onOpenProjectDir();
+    void onUploadCatalog();
     void onSettings();
 
     // Search

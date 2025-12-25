@@ -50,6 +50,10 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_downloadManager, &DownloadManager::downloadError, this, [this](int id, const QString& error) {
         m_statusLabel->setText(QString("Download error for %1: %2").arg(id).arg(error));
     });
+    connect(m_downloadManager, &DownloadManager::allDownloadsCompleted, this, [this]() {
+        // Auto-save project when all downloads complete
+        m_projectManager->saveProject();
+    });
 
     // Scale/Upload connections
     connect(m_uploadManager, &UploadManager::scaleCompleted, this, &MainWindow::onScaleCompleted);
@@ -65,6 +69,22 @@ MainWindow::MainWindow(QWidget* parent)
     });
     connect(m_uploadManager, &UploadManager::indexUploadError, this, [this](const QString& error) {
         m_statusLabel->setText(QString("Index upload error: %1").arg(error));
+    });
+    connect(m_uploadManager, &UploadManager::categoriesUploadCompleted, this, [this]() {
+        m_statusLabel->setText("Upload completed (including categories.json)");
+    });
+    connect(m_uploadManager, &UploadManager::categoriesUploadError, this, [this](const QString& error) {
+        m_statusLabel->setText(QString("Categories upload error: %1").arg(error));
+    });
+    connect(m_uploadManager, &UploadManager::s3DeleteCompleted, this, [this](const QString& bucket) {
+        m_statusLabel->setText(QString("S3 bucket '%1' deleted").arg(bucket));
+    });
+    connect(m_uploadManager, &UploadManager::s3DeleteError, this, [this](const QString& bucket, const QString& error) {
+        m_statusLabel->setText(QString("S3 delete error for '%1': %2").arg(bucket, error));
+    });
+    connect(m_uploadManager, &UploadManager::allTasksCompleted, this, [this]() {
+        // Auto-save project when all tasks complete
+        m_projectManager->saveProject();
     });
 
     // Try to load last project
@@ -221,6 +241,9 @@ void MainWindow::setupMenus()
     fileMenu->addSeparator();
     fileMenu->addAction("Open Project &Directory", this, &MainWindow::onOpenProjectDir);
     fileMenu->addAction("&Reset Project...", this, &MainWindow::onResetProject);
+    fileMenu->addAction("&Delete Project...", this, &MainWindow::onDeleteProject);
+    fileMenu->addSeparator();
+    fileMenu->addAction("Upload &Catalog JSON...", this, &MainWindow::onUploadCatalog);
     fileMenu->addSeparator();
     fileMenu->addAction("&Settings...", this, &MainWindow::onSettings);
     fileMenu->addSeparator();
@@ -379,6 +402,109 @@ void MainWindow::onResetProject()
     m_projectManager->saveProject();
 
     m_statusLabel->setText("Project reset - all videos and rejected IDs cleared");
+}
+
+void MainWindow::onDeleteProject()
+{
+    if (!m_projectManager->hasProject()) {
+        QMessageBox::information(this, "Delete Project", "No project is currently open.");
+        return;
+    }
+
+    auto& project = m_projectManager->project();
+    QString bucket = project.s3Bucket;
+    QString projectPath = project.path;
+    QString projectName = project.name;
+
+    // Show warning with the command that will be executed
+    QString s3Command = QString("aws s3 rm s3://%1 --recursive").arg(bucket);
+    QString profile = Settings::instance().awsProfile();
+    if (!profile.isEmpty() && profile != "default") {
+        s3Command += QString(" --profile %1").arg(profile);
+    }
+
+    auto result = QMessageBox::warning(this, "Delete Project",
+        QString("This will PERMANENTLY delete:\n\n"
+                "LOCAL:\n"
+                "  - All project files in: %1\n\n"
+                "S3:\n"
+                "  - All files in bucket: %2\n\n"
+                "Command to be executed:\n"
+                "  %3\n\n"
+                "The category will also be removed from categories.json.\n\n"
+                "This action CANNOT be undone. Are you sure?")
+            .arg(projectPath)
+            .arg(bucket)
+            .arg(s3Command),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::No);
+
+    if (result != QMessageBox::Yes) {
+        return;
+    }
+
+    m_statusLabel->setText("Deleting project from S3...");
+
+    // Delete from S3 first
+    m_uploadManager->deleteS3Bucket(bucket);
+
+    // Remove from categories.json and re-upload
+    m_uploadManager->removeCategoryAndUpload(bucket);
+
+    // Delete local project files
+    if (m_projectManager->deleteProject(projectPath)) {
+        m_videoList->clear();
+        m_viewModeLabel->setText("NO PROJECT");
+        m_viewModeLabel->setStyleSheet("QLabel { background-color: #888; color: white; font-weight: bold; padding: 8px; border-radius: 4px; }");
+        updateProjectUi();
+        m_statusLabel->setText(QString("Project '%1' deleted").arg(projectName));
+    } else {
+        QMessageBox::warning(this, "Error", "Failed to delete local project files.");
+    }
+}
+
+void MainWindow::onUploadCatalog()
+{
+    if (!m_projectManager->hasProject()) {
+        QMessageBox::information(this, "No Project", "No project is currently open.");
+        return;
+    }
+
+    auto& project = m_projectManager->project();
+
+    if (project.s3Bucket.isEmpty()) {
+        QMessageBox::warning(this, "No S3 Bucket",
+            "Please set an S3 bucket in project settings.");
+        return;
+    }
+
+    // Count videos with scaled files (assume uploaded if scaled exists)
+    int uploadedCount = 0;
+    for (const auto& video : project.videos) {
+        if (!video.isRejected && !video.localScaledPath.isEmpty() && QFile::exists(video.localScaledPath)) {
+            uploadedCount++;
+        }
+    }
+
+    if (uploadedCount == 0) {
+        QMessageBox::information(this, "No Videos",
+            "No scaled videos found in this project.");
+        return;
+    }
+
+    auto result = QMessageBox::question(this, "Upload Catalog",
+        QString("This will upload catalog.json with %1 videos to:\n\n"
+                "s3://%2/videos/catalog.json\n\n"
+                "Continue?")
+            .arg(uploadedCount)
+            .arg(project.s3Bucket),
+        QMessageBox::Yes | QMessageBox::No,
+        QMessageBox::Yes);
+
+    if (result == QMessageBox::Yes) {
+        m_uploadManager->uploadCatalogJson(project.s3Bucket, project.videos);
+        m_statusLabel->setText("Uploading catalog.json...");
+    }
 }
 
 void MainWindow::onOpenProjectDir()
@@ -766,8 +892,10 @@ void MainWindow::onUploadSelected()
     if (count > 0) {
         m_uploadTotal = count;
         m_uploadCompleted = 0;
-        // Also upload index.json after all videos
+        // Also upload index.json, catalog.json, and categories.json after all videos
         m_uploadManager->uploadIndexJson(project.s3Bucket, project.name);
+        m_uploadManager->uploadCatalogJson(project.s3Bucket, project.videos);
+        m_uploadManager->uploadCategoriesJson(project.s3Bucket, project.name);
         m_statusLabel->setText(QString("Uploading 1/%1 videos...").arg(count));
     } else {
         m_statusLabel->setText("No videos to upload");

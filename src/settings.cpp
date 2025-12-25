@@ -57,6 +57,17 @@ void Settings::setS3Bucket(const QString& bucket)
     emit settingsChanged();
 }
 
+QString Settings::categoriesBucket() const
+{
+    return m_settings.value("aws/categories_bucket", "decent-de1-categories").toString();
+}
+
+void Settings::setCategoriesBucket(const QString& bucket)
+{
+    m_settings.setValue("aws/categories_bucket", bucket);
+    emit settingsChanged();
+}
+
 int Settings::maxDownloadWidth() const
 {
     return m_settings.value("video/max_download_width", 1920).toInt();

@@ -44,6 +44,84 @@ void UploadManager::uploadToS3(int videoId, const QString& localPath, const QStr
     startUploadTasks();
 }
 
+void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& projectName)
+{
+    // Read existing categories or create new array
+    QString categoriesPath = Settings::instance().projectsDir() + "/../categories.json";
+    QJsonArray categories;
+
+    QFile existingFile(categoriesPath);
+    if (existingFile.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(existingFile.readAll());
+        existingFile.close();
+        if (doc.isArray()) {
+            categories = doc.array();
+        }
+    }
+
+    // Create ID from bucket name (remove common prefix)
+    QString id = bucket;
+    if (id.startsWith("decent-de1-")) {
+        id = id.mid(11);  // Remove "decent-de1-" prefix
+    }
+
+    // Check if this bucket already exists in categories
+    bool found = false;
+    for (int i = 0; i < categories.size(); ++i) {
+        QJsonObject cat = categories[i].toObject();
+        if (cat["bucket"].toString() == bucket) {
+            // Update existing entry
+            cat["name"] = projectName;
+            cat["id"] = id;
+            categories[i] = cat;
+            found = true;
+            break;
+        }
+    }
+
+    // Add new entry if not found
+    if (!found) {
+        QJsonObject newCat;
+        newCat["id"] = id;
+        newCat["name"] = projectName;
+        newCat["bucket"] = bucket;
+        categories.append(newCat);
+    }
+
+    // Write to local file
+    if (existingFile.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(categories);
+        existingFile.write(doc.toJson(QJsonDocument::Indented));
+        existingFile.close();
+    }
+
+    // Write to temp file for upload
+    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    m_tempCategoriesPath = tempDir + "/categories.json";
+
+    QFile tempFile(m_tempCategoriesPath);
+    if (tempFile.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(categories);
+        tempFile.write(doc.toJson(QJsonDocument::Indented));
+        tempFile.close();
+
+        // Queue upload task to categories bucket
+        QString categoriesBucket = Settings::instance().categoriesBucket();
+
+        Task task;
+        task.type = CategoriesUpload;
+        task.videoId = -1;
+        task.inputPath = m_tempCategoriesPath;
+        task.bucket = categoriesBucket;
+        task.key = "categories.json";
+
+        m_uploadQueue.enqueue(task);
+        startUploadTasks();
+    } else {
+        emit categoriesUploadError("Failed to create temp categories.json file");
+    }
+}
+
 void UploadManager::uploadIndexJson(const QString& bucket, const QString& projectName)
 {
     // Create index.json content
@@ -86,6 +164,119 @@ void UploadManager::uploadIndexJson(const QString& bucket, const QString& projec
     }
 }
 
+void UploadManager::uploadCatalogJson(const QString& bucket, const QList<VideoMetadata>& videos)
+{
+    // Create catalog.json as simple array of videos with scaled files
+    QJsonArray videosArray;
+    for (const auto& video : videos) {
+        if (video.isRejected) continue;
+
+        QFileInfo fileInfo(video.localScaledPath);
+        if (!fileInfo.exists()) continue;
+
+        QJsonObject v;
+        v["id"] = video.id;
+        v["path"] = fileInfo.fileName();
+        v["duration_s"] = video.duration;
+        v["author"] = video.author;
+        v["bytes"] = fileInfo.size();
+        videosArray.append(v);
+    }
+
+    // Write to temp file
+    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    m_tempCatalogPath = tempDir + "/catalog.json";
+
+    QFile file(m_tempCatalogPath);
+    if (file.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(videosArray);
+        file.write(doc.toJson(QJsonDocument::Indented));
+        file.close();
+
+        // Queue upload task
+        Task task;
+        task.type = CatalogUpload;
+        task.videoId = -1;
+        task.inputPath = m_tempCatalogPath;
+        task.bucket = bucket;
+        task.key = "videos/catalog.json";
+
+        m_uploadQueue.enqueue(task);
+        startUploadTasks();
+    } else {
+        emit indexUploadError("Failed to create temp catalog.json file");
+    }
+}
+
+void UploadManager::deleteS3Bucket(const QString& bucket)
+{
+    Task task;
+    task.type = S3Delete;
+    task.videoId = -1;
+    task.bucket = bucket;
+
+    m_uploadQueue.enqueue(task);
+    startUploadTasks();
+}
+
+void UploadManager::removeCategoryAndUpload(const QString& bucket)
+{
+    // Read existing categories
+    QString categoriesPath = Settings::instance().projectsDir() + "/../categories.json";
+    QJsonArray categories;
+
+    QFile existingFile(categoriesPath);
+    if (existingFile.open(QIODevice::ReadOnly)) {
+        QJsonDocument doc = QJsonDocument::fromJson(existingFile.readAll());
+        existingFile.close();
+        if (doc.isArray()) {
+            categories = doc.array();
+        }
+    }
+
+    // Remove the category with matching bucket
+    QJsonArray newCategories;
+    for (int i = 0; i < categories.size(); ++i) {
+        QJsonObject cat = categories[i].toObject();
+        if (cat["bucket"].toString() != bucket) {
+            newCategories.append(cat);
+        }
+    }
+
+    // Write to local file
+    if (existingFile.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(newCategories);
+        existingFile.write(doc.toJson(QJsonDocument::Indented));
+        existingFile.close();
+    }
+
+    // Write to temp file for upload
+    QString tempDir = QStandardPaths::writableLocation(QStandardPaths::TempLocation);
+    m_tempCategoriesPath = tempDir + "/categories.json";
+
+    QFile tempFile(m_tempCategoriesPath);
+    if (tempFile.open(QIODevice::WriteOnly)) {
+        QJsonDocument doc(newCategories);
+        tempFile.write(doc.toJson(QJsonDocument::Indented));
+        tempFile.close();
+
+        // Queue upload task to categories bucket
+        QString categoriesBucket = Settings::instance().categoriesBucket();
+
+        Task task;
+        task.type = CategoriesUpload;
+        task.videoId = -1;
+        task.inputPath = m_tempCategoriesPath;
+        task.bucket = categoriesBucket;
+        task.key = "categories.json";
+
+        m_uploadQueue.enqueue(task);
+        startUploadTasks();
+    } else {
+        emit categoriesUploadError("Failed to create temp categories.json file");
+    }
+}
+
 void UploadManager::cancelAll()
 {
     m_scaleQueue.clear();
@@ -105,10 +296,18 @@ void UploadManager::cancelAll()
     }
     m_runningUploads.clear();
 
-    // Clean up temp file
+    // Clean up temp files
     if (!m_tempIndexPath.isEmpty()) {
         QFile::remove(m_tempIndexPath);
         m_tempIndexPath.clear();
+    }
+    if (!m_tempCatalogPath.isEmpty()) {
+        QFile::remove(m_tempCatalogPath);
+        m_tempCatalogPath.clear();
+    }
+    if (!m_tempCategoriesPath.isEmpty()) {
+        QFile::remove(m_tempCategoriesPath);
+        m_tempCategoriesPath.clear();
     }
 }
 
@@ -167,14 +366,19 @@ void UploadManager::startUploadTasks()
             emit uploadStarted(task.videoId);
         }
 
-        QString s3Path = QString("s3://%1/%2").arg(task.bucket, task.key);
-
         QStringList args;
-        args << "s3" << "cp"
-             << task.inputPath
-             << s3Path;
-
         QString profile = Settings::instance().awsProfile();
+
+        if (task.type == S3Delete) {
+            // Delete all objects in bucket: aws s3 rm s3://bucket --recursive
+            QString s3Path = QString("s3://%1").arg(task.bucket);
+            args << "s3" << "rm" << s3Path << "--recursive";
+        } else {
+            // Upload file: aws s3 cp local s3://bucket/key
+            QString s3Path = QString("s3://%1/%2").arg(task.bucket, task.key);
+            args << "s3" << "cp" << task.inputPath << s3Path;
+        }
+
         if (!profile.isEmpty() && profile != "default") {
             args << "--profile" << profile;
         }
@@ -256,19 +460,39 @@ void UploadManager::onUploadProcessFinished(int exitCode, QProcess::ExitStatus s
 
         if (task.type == Upload) {
             emit uploadError(task.videoId, error);
-        } else {
+        } else if (task.type == IndexUpload || task.type == CatalogUpload) {
             emit indexUploadError(error);
+        } else if (task.type == CategoriesUpload) {
+            emit categoriesUploadError(error);
+        } else if (task.type == S3Delete) {
+            emit s3DeleteError(task.bucket, error);
         }
     } else {
         if (task.type == Upload) {
             emit uploadCompleted(task.videoId);
-        } else {
+        } else if (task.type == IndexUpload) {
             // Clean up temp file after successful index upload
             if (!m_tempIndexPath.isEmpty()) {
                 QFile::remove(m_tempIndexPath);
                 m_tempIndexPath.clear();
             }
             emit indexUploadCompleted();
+        } else if (task.type == CatalogUpload) {
+            // Clean up temp file after successful catalog upload
+            if (!m_tempCatalogPath.isEmpty()) {
+                QFile::remove(m_tempCatalogPath);
+                m_tempCatalogPath.clear();
+            }
+            // No separate signal for catalog - it's part of the index upload flow
+        } else if (task.type == CategoriesUpload) {
+            // Clean up temp file after successful categories upload
+            if (!m_tempCategoriesPath.isEmpty()) {
+                QFile::remove(m_tempCategoriesPath);
+                m_tempCategoriesPath.clear();
+            }
+            emit categoriesUploadCompleted();
+        } else if (task.type == S3Delete) {
+            emit s3DeleteCompleted(task.bucket);
         }
     }
 
@@ -305,8 +529,12 @@ void UploadManager::onUploadProcessError(QProcess::ProcessError error)
 
     if (task.type == Upload) {
         emit uploadError(task.videoId, errorMsg);
-    } else {
+    } else if (task.type == IndexUpload || task.type == CatalogUpload) {
         emit indexUploadError(errorMsg);
+    } else if (task.type == CategoriesUpload) {
+        emit categoriesUploadError(errorMsg);
+    } else if (task.type == S3Delete) {
+        emit s3DeleteError(task.bucket, errorMsg);
     }
 
     startUploadTasks();

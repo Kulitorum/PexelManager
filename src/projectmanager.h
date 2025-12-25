@@ -29,6 +29,7 @@ public:
     bool loadProject(const QString& path);
     bool saveProject();
     void closeProject();
+    bool deleteProject(const QString& path);
 
     bool hasProject() const { return !m_project.path.isEmpty(); }
     Project& project() { return m_project; }
