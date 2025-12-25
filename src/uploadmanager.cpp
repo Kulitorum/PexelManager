@@ -28,10 +28,7 @@ void UploadManager::scaleVideo(int videoId, const QString& inputPath, const QStr
     task.preset = preset;
 
     m_scaleQueue.enqueue(task);
-
-    if (!m_currentProcess) {
-        startNextTask();
-    }
+    startScaleTasks();
 }
 
 void UploadManager::uploadToS3(int videoId, const QString& localPath, const QString& bucket, const QString& key)
@@ -44,10 +41,7 @@ void UploadManager::uploadToS3(int videoId, const QString& localPath, const QStr
     task.key = key;
 
     m_uploadQueue.enqueue(task);
-
-    if (!m_currentProcess) {
-        startNextTask();
-    }
+    startUploadTasks();
 }
 
 void UploadManager::uploadIndexJson(const QString& bucket, const QString& projectName)
@@ -86,10 +80,7 @@ void UploadManager::uploadIndexJson(const QString& bucket, const QString& projec
         task.key = "index.json";
 
         m_uploadQueue.enqueue(task);
-
-        if (!m_currentProcess) {
-            startNextTask();
-        }
+        startUploadTasks();
     } else {
         emit indexUploadError("Failed to create temp index.json file");
     }
@@ -100,11 +91,19 @@ void UploadManager::cancelAll()
     m_scaleQueue.clear();
     m_uploadQueue.clear();
 
-    if (m_currentProcess) {
-        m_currentProcess->kill();
-        m_currentProcess->deleteLater();
-        m_currentProcess = nullptr;
+    // Kill all running scale processes
+    for (auto process : m_runningScales.keys()) {
+        process->kill();
+        process->deleteLater();
     }
+    m_runningScales.clear();
+
+    // Kill all running upload processes
+    for (auto process : m_runningUploads.keys()) {
+        process->kill();
+        process->deleteLater();
+    }
+    m_runningUploads.clear();
 
     // Clean up temp file
     if (!m_tempIndexPath.isEmpty()) {
@@ -113,58 +112,66 @@ void UploadManager::cancelAll()
     }
 }
 
-void UploadManager::startNextTask()
+void UploadManager::startScaleTasks()
 {
-    // Prioritize scaling over uploading
-    if (!m_scaleQueue.isEmpty()) {
-        m_currentTask = m_scaleQueue.dequeue();
-    } else if (!m_uploadQueue.isEmpty()) {
-        m_currentTask = m_uploadQueue.dequeue();
-    } else {
-        emit allTasksCompleted();
-        return;
-    }
+    while (m_runningScales.size() < MAX_CONCURRENT_SCALES && !m_scaleQueue.isEmpty()) {
+        Task task = m_scaleQueue.dequeue();
 
-    m_currentProcess = new QProcess(this);
+        auto process = new QProcess(this);
 
-    connect(m_currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, &UploadManager::onProcessFinished);
-    connect(m_currentProcess, &QProcess::errorOccurred,
-            this, &UploadManager::onProcessError);
+        connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, &UploadManager::onScaleProcessFinished);
+        connect(process, &QProcess::errorOccurred,
+                this, &UploadManager::onScaleProcessError);
 
-    if (m_currentTask.type == Scale) {
-        emit scaleStarted(m_currentTask.videoId);
+        m_runningScales[process] = task;
+
+        emit scaleStarted(task.videoId);
 
         // Build ffmpeg command
-        // scale=W:H:force_original_aspect_ratio=increase,crop=W:H
         QString vf = QString("scale=%1:%2:force_original_aspect_ratio=increase,crop=%1:%2")
-            .arg(m_currentTask.targetWidth)
-            .arg(m_currentTask.targetHeight);
+            .arg(task.targetWidth)
+            .arg(task.targetHeight);
 
         QStringList args;
         args << "-y"
-             << "-i" << m_currentTask.inputPath
+             << "-i" << task.inputPath
              << "-an"
              << "-vf" << vf
              << "-c:v" << "libx264"
-             << "-preset" << m_currentTask.preset
-             << "-crf" << QString::number(m_currentTask.crf)
+             << "-preset" << task.preset
+             << "-crf" << QString::number(task.crf)
              << "-pix_fmt" << "yuv420p"
              << "-movflags" << "+faststart"
-             << m_currentTask.outputPath;
+             << task.outputPath;
 
-        m_currentProcess->start("ffmpeg", args);
+        process->start("ffmpeg", args);
+    }
+}
 
-    } else {  // Upload or IndexUpload
-        if (m_currentTask.type == Upload) {
-            emit uploadStarted(m_currentTask.videoId);
+void UploadManager::startUploadTasks()
+{
+    while (m_runningUploads.size() < MAX_CONCURRENT_UPLOADS && !m_uploadQueue.isEmpty()) {
+        Task task = m_uploadQueue.dequeue();
+
+        auto process = new QProcess(this);
+
+        connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+                this, &UploadManager::onUploadProcessFinished);
+        connect(process, &QProcess::errorOccurred,
+                this, &UploadManager::onUploadProcessError);
+
+        m_runningUploads[process] = task;
+
+        if (task.type == Upload) {
+            emit uploadStarted(task.videoId);
         }
 
-        QString s3Path = QString("s3://%1/%2").arg(m_currentTask.bucket, m_currentTask.key);
+        QString s3Path = QString("s3://%1/%2").arg(task.bucket, task.key);
 
         QStringList args;
         args << "s3" << "cp"
-             << m_currentTask.inputPath
+             << task.inputPath
              << s3Path;
 
         QString profile = Settings::instance().awsProfile();
@@ -172,37 +179,91 @@ void UploadManager::startNextTask()
             args << "--profile" << profile;
         }
 
-        m_currentProcess->start("aws", args);
+        process->start("aws", args);
     }
 }
 
-void UploadManager::onProcessFinished(int exitCode, QProcess::ExitStatus status)
+void UploadManager::onScaleProcessFinished(int exitCode, QProcess::ExitStatus status)
 {
-    if (!m_currentProcess) return;
+    auto process = qobject_cast<QProcess*>(sender());
+    if (!process || !m_runningScales.contains(process)) return;
 
-    QString output = m_currentProcess->readAllStandardOutput();
-    QString errorOutput = m_currentProcess->readAllStandardError();
+    Task task = m_runningScales.take(process);
 
-    m_currentProcess->deleteLater();
-    m_currentProcess = nullptr;
+    QString errorOutput = process->readAllStandardError();
+    process->deleteLater();
+
+    if (status != QProcess::NormalExit || exitCode != 0) {
+        QString error = errorOutput.isEmpty() ? QString("Exit code: %1").arg(exitCode) : errorOutput;
+        emit scaleError(task.videoId, error);
+    } else {
+        emit scaleCompleted(task.videoId, task.outputPath);
+    }
+
+    // Start more tasks if available
+    startScaleTasks();
+
+    // Check if all done
+    if (m_runningScales.isEmpty() && m_scaleQueue.isEmpty() &&
+        m_runningUploads.isEmpty() && m_uploadQueue.isEmpty()) {
+        emit allTasksCompleted();
+    }
+}
+
+void UploadManager::onScaleProcessError(QProcess::ProcessError error)
+{
+    auto process = qobject_cast<QProcess*>(sender());
+    if (!process || !m_runningScales.contains(process)) return;
+
+    Task task = m_runningScales.take(process);
+    process->deleteLater();
+
+    QString errorMsg;
+    switch (error) {
+        case QProcess::FailedToStart:
+            errorMsg = "ffmpeg not found. Please install ffmpeg.";
+            break;
+        case QProcess::Crashed:
+            errorMsg = "ffmpeg crashed";
+            break;
+        default:
+            errorMsg = "Unknown process error";
+            break;
+    }
+
+    emit scaleError(task.videoId, errorMsg);
+
+    startScaleTasks();
+
+    if (m_runningScales.isEmpty() && m_scaleQueue.isEmpty() &&
+        m_runningUploads.isEmpty() && m_uploadQueue.isEmpty()) {
+        emit allTasksCompleted();
+    }
+}
+
+void UploadManager::onUploadProcessFinished(int exitCode, QProcess::ExitStatus status)
+{
+    auto process = qobject_cast<QProcess*>(sender());
+    if (!process || !m_runningUploads.contains(process)) return;
+
+    Task task = m_runningUploads.take(process);
+
+    QString errorOutput = process->readAllStandardError();
+    process->deleteLater();
 
     if (status != QProcess::NormalExit || exitCode != 0) {
         QString error = errorOutput.isEmpty() ? QString("Exit code: %1").arg(exitCode) : errorOutput;
 
-        if (m_currentTask.type == Scale) {
-            emit scaleError(m_currentTask.videoId, error);
-        } else if (m_currentTask.type == Upload) {
-            emit uploadError(m_currentTask.videoId, error);
+        if (task.type == Upload) {
+            emit uploadError(task.videoId, error);
         } else {
             emit indexUploadError(error);
         }
     } else {
-        if (m_currentTask.type == Scale) {
-            emit scaleCompleted(m_currentTask.videoId, m_currentTask.outputPath);
-        } else if (m_currentTask.type == Upload) {
-            emit uploadCompleted(m_currentTask.videoId);
+        if (task.type == Upload) {
+            emit uploadCompleted(task.videoId);
         } else {
-            // Clean up temp file after successful upload
+            // Clean up temp file after successful index upload
             if (!m_tempIndexPath.isEmpty()) {
                 QFile::remove(m_tempIndexPath);
                 m_tempIndexPath.clear();
@@ -211,38 +272,47 @@ void UploadManager::onProcessFinished(int exitCode, QProcess::ExitStatus status)
         }
     }
 
-    startNextTask();
+    // Start more tasks if available
+    startUploadTasks();
+
+    // Check if all done
+    if (m_runningScales.isEmpty() && m_scaleQueue.isEmpty() &&
+        m_runningUploads.isEmpty() && m_uploadQueue.isEmpty()) {
+        emit allTasksCompleted();
+    }
 }
 
-void UploadManager::onProcessError(QProcess::ProcessError error)
+void UploadManager::onUploadProcessError(QProcess::ProcessError error)
 {
-    if (!m_currentProcess) return;
+    auto process = qobject_cast<QProcess*>(sender());
+    if (!process || !m_runningUploads.contains(process)) return;
+
+    Task task = m_runningUploads.take(process);
+    process->deleteLater();
 
     QString errorMsg;
     switch (error) {
         case QProcess::FailedToStart:
-            errorMsg = m_currentTask.type == Scale
-                ? "ffmpeg not found. Please install ffmpeg."
-                : "aws cli not found. Please install AWS CLI.";
+            errorMsg = "aws cli not found. Please install AWS CLI.";
             break;
         case QProcess::Crashed:
-            errorMsg = "Process crashed";
+            errorMsg = "aws cli crashed";
             break;
         default:
             errorMsg = "Unknown process error";
             break;
     }
 
-    m_currentProcess->deleteLater();
-    m_currentProcess = nullptr;
-
-    if (m_currentTask.type == Scale) {
-        emit scaleError(m_currentTask.videoId, errorMsg);
-    } else if (m_currentTask.type == Upload) {
-        emit uploadError(m_currentTask.videoId, errorMsg);
+    if (task.type == Upload) {
+        emit uploadError(task.videoId, errorMsg);
     } else {
         emit indexUploadError(errorMsg);
     }
 
-    startNextTask();
+    startUploadTasks();
+
+    if (m_runningScales.isEmpty() && m_scaleQueue.isEmpty() &&
+        m_runningUploads.isEmpty() && m_uploadQueue.isEmpty()) {
+        emit allTasksCompleted();
+    }
 }

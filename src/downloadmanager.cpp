@@ -15,119 +15,130 @@ void DownloadManager::downloadVideo(int videoId, const QUrl& url, const QString&
     task.destPath = destPath;
 
     m_queue.enqueue(task);
-
-    if (!m_currentReply) {
-        startNextDownload();
-    }
+    startDownloads();
 }
 
 void DownloadManager::cancelAll()
 {
     m_queue.clear();
 
-    if (m_currentReply) {
-        m_currentReply->abort();
-        m_currentReply->deleteLater();
-        m_currentReply = nullptr;
+    for (auto reply : m_activeDownloads.keys()) {
+        ActiveDownload& download = m_activeDownloads[reply];
+        reply->abort();
+        reply->deleteLater();
+        if (download.file) {
+            download.file->close();
+            download.file->remove();
+            delete download.file;
+        }
     }
-
-    if (m_currentFile) {
-        m_currentFile->close();
-        m_currentFile->remove();
-        delete m_currentFile;
-        m_currentFile = nullptr;
-    }
+    m_activeDownloads.clear();
 }
 
-void DownloadManager::startNextDownload()
+void DownloadManager::startDownloads()
 {
-    if (m_queue.isEmpty()) {
-        emit allDownloadsCompleted();
-        return;
-    }
+    while (m_activeDownloads.size() < MAX_CONCURRENT_DOWNLOADS && !m_queue.isEmpty()) {
+        DownloadTask task = m_queue.dequeue();
 
-    m_currentTask = m_queue.dequeue();
-
-    // Ensure directory exists
-    QFileInfo info(m_currentTask.destPath);
-    QDir dir = info.absoluteDir();
-    if (!dir.exists()) {
-        dir.mkpath(".");
-    }
-
-    // Check if file already exists
-    if (QFile::exists(m_currentTask.destPath)) {
-        emit downloadCompleted(m_currentTask.videoId, m_currentTask.destPath);
-        startNextDownload();
-        return;
-    }
-
-    // Create temp file
-    QString tempPath = m_currentTask.destPath + ".part";
-    m_currentFile = new QFile(tempPath);
-    if (!m_currentFile->open(QIODevice::WriteOnly)) {
-        emit downloadError(m_currentTask.videoId,
-            QString("Cannot create file: %1").arg(tempPath));
-        delete m_currentFile;
-        m_currentFile = nullptr;
-        startNextDownload();
-        return;
-    }
-
-    emit downloadStarted(m_currentTask.videoId);
-
-    QNetworkRequest request(m_currentTask.url);
-    request.setRawHeader("User-Agent", "PexelManager/1.0");
-
-    m_currentReply = m_network.get(request);
-
-    connect(m_currentReply, &QNetworkReply::downloadProgress,
-            this, &DownloadManager::onDownloadProgress);
-    connect(m_currentReply, &QNetworkReply::finished,
-            this, &DownloadManager::onDownloadFinished);
-    connect(m_currentReply, &QNetworkReply::readyRead, this, [this]() {
-        if (m_currentFile && m_currentReply) {
-            m_currentFile->write(m_currentReply->readAll());
+        // Ensure directory exists
+        QFileInfo info(task.destPath);
+        QDir dir = info.absoluteDir();
+        if (!dir.exists()) {
+            dir.mkpath(".");
         }
-    });
+
+        // Check if file already exists
+        if (QFile::exists(task.destPath)) {
+            emit downloadCompleted(task.videoId, task.destPath);
+            continue;  // Try next in queue
+        }
+
+        // Create temp file
+        QString tempPath = task.destPath + ".part";
+        QFile* file = new QFile(tempPath);
+        if (!file->open(QIODevice::WriteOnly)) {
+            emit downloadError(task.videoId,
+                QString("Cannot create file: %1").arg(tempPath));
+            delete file;
+            continue;  // Try next in queue
+        }
+
+        emit downloadStarted(task.videoId);
+
+        QNetworkRequest request(task.url);
+        request.setRawHeader("User-Agent", "PexelManager/1.0");
+
+        QNetworkReply* reply = m_network.get(request);
+
+        ActiveDownload download;
+        download.task = task;
+        download.file = file;
+        m_activeDownloads[reply] = download;
+
+        connect(reply, &QNetworkReply::downloadProgress,
+                this, &DownloadManager::onDownloadProgress);
+        connect(reply, &QNetworkReply::finished,
+                this, &DownloadManager::onDownloadFinished);
+        connect(reply, &QNetworkReply::readyRead, this, [this, reply]() {
+            if (m_activeDownloads.contains(reply)) {
+                ActiveDownload& download = m_activeDownloads[reply];
+                if (download.file) {
+                    download.file->write(reply->readAll());
+                }
+            }
+        });
+    }
+
+    // Check if all done
+    if (m_activeDownloads.isEmpty() && m_queue.isEmpty()) {
+        emit allDownloadsCompleted();
+    }
 }
 
 void DownloadManager::onDownloadProgress(qint64 received, qint64 total)
 {
-    emit downloadProgress(m_currentTask.videoId, received, total);
+    auto reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply || !m_activeDownloads.contains(reply)) return;
+
+    emit downloadProgress(m_activeDownloads[reply].task.videoId, received, total);
 }
 
 void DownloadManager::onDownloadFinished()
 {
-    if (!m_currentReply || !m_currentFile) return;
+    auto reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply || !m_activeDownloads.contains(reply)) return;
 
-    auto reply = m_currentReply;
-    m_currentReply = nullptr;
+    ActiveDownload download = m_activeDownloads.take(reply);
 
     // Write any remaining data
-    m_currentFile->write(reply->readAll());
-    m_currentFile->close();
+    if (download.file) {
+        download.file->write(reply->readAll());
+        download.file->close();
+    }
 
-    QString tempPath = m_currentFile->fileName();
-    delete m_currentFile;
-    m_currentFile = nullptr;
+    QString tempPath = download.file ? download.file->fileName() : QString();
+    delete download.file;
 
     if (reply->error() != QNetworkReply::NoError) {
-        QFile::remove(tempPath);
+        if (!tempPath.isEmpty()) {
+            QFile::remove(tempPath);
+        }
         if (reply->error() != QNetworkReply::OperationCanceledError) {
-            emit downloadError(m_currentTask.videoId,
+            emit downloadError(download.task.videoId,
                 QString("Download failed: %1").arg(reply->errorString()));
         }
     } else {
         // Rename temp file to final
-        QFile::remove(m_currentTask.destPath);  // Remove if exists
-        if (QFile::rename(tempPath, m_currentTask.destPath)) {
-            emit downloadCompleted(m_currentTask.videoId, m_currentTask.destPath);
+        QFile::remove(download.task.destPath);  // Remove if exists
+        if (QFile::rename(tempPath, download.task.destPath)) {
+            emit downloadCompleted(download.task.videoId, download.task.destPath);
         } else {
-            emit downloadError(m_currentTask.videoId, "Failed to rename downloaded file");
+            emit downloadError(download.task.videoId, "Failed to rename downloaded file");
         }
     }
 
     reply->deleteLater();
-    startNextDownload();
+
+    // Start more downloads if available
+    startDownloads();
 }

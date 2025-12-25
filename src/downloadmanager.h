@@ -5,6 +5,7 @@
 #include <QNetworkReply>
 #include <QQueue>
 #include <QFile>
+#include <QMap>
 
 class DownloadManager : public QObject
 {
@@ -16,8 +17,10 @@ public:
     void downloadVideo(int videoId, const QUrl& url, const QString& destPath);
     void cancelAll();
 
-    bool isDownloading() const { return m_currentReply != nullptr || !m_queue.isEmpty(); }
-    int pendingCount() const { return m_queue.size() + (m_currentReply ? 1 : 0); }
+    bool isDownloading() const { return !m_activeDownloads.isEmpty() || !m_queue.isEmpty(); }
+    int pendingCount() const { return m_queue.size() + m_activeDownloads.size(); }
+
+    static const int MAX_CONCURRENT_DOWNLOADS = 8;
 
 signals:
     void downloadStarted(int videoId);
@@ -31,7 +34,7 @@ private slots:
     void onDownloadFinished();
 
 private:
-    void startNextDownload();
+    void startDownloads();
 
     struct DownloadTask {
         int videoId;
@@ -39,9 +42,12 @@ private:
         QString destPath;
     };
 
+    struct ActiveDownload {
+        DownloadTask task;
+        QFile* file;
+    };
+
     QNetworkAccessManager m_network;
-    QNetworkReply* m_currentReply = nullptr;
-    QFile* m_currentFile = nullptr;
-    DownloadTask m_currentTask;
+    QMap<QNetworkReply*, ActiveDownload> m_activeDownloads;
     QQueue<DownloadTask> m_queue;
 };
