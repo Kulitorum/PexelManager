@@ -23,7 +23,7 @@ set(SOURCES
     src/mainwindow.cpp
     src/settings.cpp
     src/pexelsapi.cpp
-    src/videolistwidget.cpp
+    src/medialistwidget.cpp
     src/videoplayerwidget.cpp
     src/projectmanager.cpp
     src/downloadmanager.cpp
@@ -34,12 +34,12 @@ set(HEADERS
     src/mainwindow.h
     src/settings.h
     src/pexelsapi.h
-    src/videolistwidget.h
+    src/medialistwidget.h
     src/videoplayerwidget.h
     src/projectmanager.h
     src/downloadmanager.h
     src/uploadmanager.h
-    src/videometadata.h
+    src/mediametadata.h
 )
 
 # Main executable

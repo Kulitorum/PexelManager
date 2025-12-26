@@ -3,15 +3,16 @@
 #include <QObject>
 #include <QString>
 #include <QSet>
-#include "videometadata.h"
+#include "mediametadata.h"
 
 struct Project {
     QString name;
     QString path;
     QString s3Bucket;
+    QString categoryId;
     QString searchQuery;
     int minDuration = 30;
-    QList<VideoMetadata> videos;
+    QList<MediaMetadata> media;
     QSet<int> rejectedIds;
 
     QString rawDir() const;
@@ -25,7 +26,7 @@ class ProjectManager : public QObject
 public:
     explicit ProjectManager(QObject* parent = nullptr);
 
-    bool createProject(const QString& name, const QString& s3Bucket);
+    bool createProject(const QString& name, const QString& categoryId);
     bool loadProject(const QString& path);
     bool saveProject();
     void closeProject();
@@ -35,9 +36,9 @@ public:
     Project& project() { return m_project; }
     const Project& project() const { return m_project; }
 
-    void addVideos(const QList<VideoMetadata>& videos);
-    void rejectVideo(int id);
-    void updateVideo(const VideoMetadata& video);
+    void addMedia(const QList<MediaMetadata>& items);
+    void rejectMedia(int id);
+    void updateMedia(const MediaMetadata& item);
 
     static QStringList availableProjects();
 
@@ -45,7 +46,7 @@ signals:
     void projectLoaded();
     void projectSaved();
     void projectClosed();
-    void videosChanged();
+    void mediaChanged();
 
 private:
     Project m_project;

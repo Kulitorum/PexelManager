@@ -10,7 +10,17 @@ PexelsApi::PexelsApi(QObject* parent)
 {
 }
 
-void PexelsApi::search(const QString& query, int page, int perPage, int minDuration)
+void PexelsApi::searchVideos(const QString& query, int page, int perPage, int minDuration)
+{
+    search(query, SearchType::Videos, page, perPage, minDuration);
+}
+
+void PexelsApi::searchPhotos(const QString& query, int page, int perPage)
+{
+    search(query, SearchType::Photos, page, perPage, 0);
+}
+
+void PexelsApi::search(const QString& query, SearchType type, int page, int perPage, int minDuration)
 {
     cancelSearch();
 
@@ -20,16 +30,24 @@ void PexelsApi::search(const QString& query, int page, int perPage, int minDurat
         return;
     }
 
-    QUrl url("https://api.pexels.com/videos/search");
+    m_currentSearchType = type;
+
+    QUrl url;
     QUrlQuery params;
     params.addQueryItem("query", query);
     params.addQueryItem("page", QString::number(page));
     params.addQueryItem("per_page", QString::number(perPage));
-    if (minDuration > 0) {
-        params.addQueryItem("min_duration", QString::number(minDuration));
-    }
-    // Prefer landscape videos
     params.addQueryItem("orientation", "landscape");
+
+    if (type == SearchType::Videos) {
+        url = QUrl("https://api.pexels.com/videos/search");
+        if (minDuration > 0) {
+            params.addQueryItem("min_duration", QString::number(minDuration));
+        }
+    } else {
+        url = QUrl("https://api.pexels.com/v1/search");
+    }
+
     url.setQuery(params);
 
     QNetworkRequest request(url);
@@ -79,11 +97,19 @@ void PexelsApi::onSearchFinished()
     int totalResults = root["total_results"].toInt();
     int page = root["page"].toInt();
 
-    QList<VideoMetadata> videos;
-    QJsonArray videosArray = root["videos"].toArray();
-    for (const auto& v : videosArray) {
-        videos.append(VideoMetadata::fromPexelsJson(v.toObject()));
+    QList<MediaMetadata> media;
+
+    if (m_currentSearchType == SearchType::Videos) {
+        QJsonArray videosArray = root["videos"].toArray();
+        for (const auto& v : videosArray) {
+            media.append(MediaMetadata::fromPexelsVideoJson(v.toObject()));
+        }
+    } else {
+        QJsonArray photosArray = root["photos"].toArray();
+        for (const auto& p : photosArray) {
+            media.append(MediaMetadata::fromPexelsPhotoJson(p.toObject()));
+        }
     }
 
-    emit searchCompleted(videos, totalResults, page);
+    emit searchCompleted(media, totalResults, page);
 }

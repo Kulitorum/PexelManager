@@ -14,12 +14,13 @@ UploadManager::UploadManager(QObject* parent)
 {
 }
 
-void UploadManager::scaleVideo(int videoId, const QString& inputPath, const QString& outputPath,
+void UploadManager::scaleMedia(int mediaId, MediaType type, const QString& inputPath, const QString& outputPath,
                                 int targetWidth, int targetHeight, int crf, const QString& preset)
 {
     Task task;
     task.type = Scale;
-    task.videoId = videoId;
+    task.mediaType = type;
+    task.mediaId = mediaId;
     task.inputPath = inputPath;
     task.outputPath = outputPath;
     task.targetWidth = targetWidth;
@@ -31,11 +32,11 @@ void UploadManager::scaleVideo(int videoId, const QString& inputPath, const QStr
     startScaleTasks();
 }
 
-void UploadManager::uploadToS3(int videoId, const QString& localPath, const QString& bucket, const QString& key)
+void UploadManager::uploadToS3(int mediaId, const QString& localPath, const QString& bucket, const QString& key)
 {
     Task task;
     task.type = Upload;
-    task.videoId = videoId;
+    task.mediaId = mediaId;
     task.inputPath = localPath;
     task.bucket = bucket;
     task.key = key;
@@ -44,7 +45,7 @@ void UploadManager::uploadToS3(int videoId, const QString& localPath, const QStr
     startUploadTasks();
 }
 
-void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& projectName)
+void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& categoryId, const QString& projectName)
 {
     // Read existing categories or create new array
     QString categoriesPath = Settings::instance().projectsDir() + "/../categories.json";
@@ -59,21 +60,16 @@ void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& p
         }
     }
 
-    // Create ID from bucket name (remove common prefix)
-    QString id = bucket;
-    if (id.startsWith("decent-de1-")) {
-        id = id.mid(11);  // Remove "decent-de1-" prefix
-    }
-
-    // Check if this bucket already exists in categories
+    // Check if this category already exists
     bool found = false;
     for (int i = 0; i < categories.size(); ++i) {
         QJsonObject cat = categories[i].toObject();
-        if (cat["bucket"].toString() == bucket) {
-            // Update existing entry
-            cat["name"] = projectName;
-            cat["id"] = id;
-            categories[i] = cat;
+        if (cat["id"].toString() == categoryId) {
+            // Update existing entry (only keep id and name)
+            QJsonObject updated;
+            updated["id"] = categoryId;
+            updated["name"] = projectName;
+            categories[i] = updated;
             found = true;
             break;
         }
@@ -82,9 +78,8 @@ void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& p
     // Add new entry if not found
     if (!found) {
         QJsonObject newCat;
-        newCat["id"] = id;
+        newCat["id"] = categoryId;
         newCat["name"] = projectName;
-        newCat["bucket"] = bucket;
         categories.append(newCat);
     }
 
@@ -105,14 +100,12 @@ void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& p
         tempFile.write(doc.toJson(QJsonDocument::Indented));
         tempFile.close();
 
-        // Queue upload task to categories bucket
-        QString categoriesBucket = Settings::instance().categoriesBucket();
-
+        // Queue upload task to same bucket (categories.json at root)
         Task task;
         task.type = CategoriesUpload;
-        task.videoId = -1;
+        task.mediaId = -1;
         task.inputPath = m_tempCategoriesPath;
-        task.bucket = categoriesBucket;
+        task.bucket = bucket;
         task.key = "categories.json";
 
         m_uploadQueue.enqueue(task);
@@ -122,7 +115,7 @@ void UploadManager::uploadCategoriesJson(const QString& bucket, const QString& p
     }
 }
 
-void UploadManager::uploadIndexJson(const QString& bucket, const QString& projectName)
+void UploadManager::uploadIndexJson(const QString& bucket, const QString& categoryId, const QString& projectName)
 {
     // Create index.json content
     QJsonObject root;
@@ -130,12 +123,12 @@ void UploadManager::uploadIndexJson(const QString& bucket, const QString& projec
 
     QJsonArray prefixes;
 
-    QJsonObject scaledPrefix;
-    scaledPrefix["prefix"] = QString("videos/");
-    scaledPrefix["name"] = projectName;
-    scaledPrefix["description"] = "1280x800 cropped, production-ready videos";
-    scaledPrefix["catalog"] = QString("videos/catalog.json");
-    prefixes.append(scaledPrefix);
+    QJsonObject mediaPrefix;
+    mediaPrefix["prefix"] = QString("media/");
+    mediaPrefix["name"] = projectName;
+    mediaPrefix["description"] = "1280x800 cropped, production-ready media";
+    mediaPrefix["catalog"] = QString("catalogs/%1.json").arg(categoryId);
+    prefixes.append(mediaPrefix);
 
     root["prefixes"] = prefixes;
 
@@ -152,7 +145,7 @@ void UploadManager::uploadIndexJson(const QString& bucket, const QString& projec
         // Queue upload task
         Task task;
         task.type = IndexUpload;
-        task.videoId = -1;
+        task.mediaId = -1;
         task.inputPath = m_tempIndexPath;
         task.bucket = bucket;
         task.key = "index.json";
@@ -164,23 +157,29 @@ void UploadManager::uploadIndexJson(const QString& bucket, const QString& projec
     }
 }
 
-void UploadManager::uploadCatalogJson(const QString& bucket, const QList<VideoMetadata>& videos)
+void UploadManager::uploadCatalogJson(const QString& bucket, const QString& categoryId, const QList<MediaMetadata>& media)
 {
-    // Create catalog.json as simple array of videos with scaled files
-    QJsonArray videosArray;
-    for (const auto& video : videos) {
-        if (video.isRejected) continue;
+    // Create catalog.json as simple array of media items with scaled files
+    QJsonArray mediaArray;
+    for (const auto& item : media) {
+        if (item.isRejected) continue;
 
-        QFileInfo fileInfo(video.localScaledPath);
+        QFileInfo fileInfo(item.localScaledPath);
         if (!fileInfo.exists()) continue;
 
-        QJsonObject v;
-        v["id"] = video.id;
-        v["path"] = fileInfo.fileName();
-        v["duration_s"] = video.duration;
-        v["author"] = video.author;
-        v["bytes"] = fileInfo.size();
-        videosArray.append(v);
+        QJsonObject m;
+        m["id"] = item.id;
+        m["type"] = item.isVideo() ? "video" : "image";
+        m["path"] = fileInfo.fileName();
+        m["author"] = item.author;
+        m["bytes"] = fileInfo.size();
+
+        // Only include duration for videos
+        if (item.isVideo()) {
+            m["duration_s"] = item.duration;
+        }
+
+        mediaArray.append(m);
     }
 
     // Write to temp file
@@ -189,17 +188,17 @@ void UploadManager::uploadCatalogJson(const QString& bucket, const QList<VideoMe
 
     QFile file(m_tempCatalogPath);
     if (file.open(QIODevice::WriteOnly)) {
-        QJsonDocument doc(videosArray);
+        QJsonDocument doc(mediaArray);
         file.write(doc.toJson(QJsonDocument::Indented));
         file.close();
 
-        // Queue upload task
+        // Queue upload task - new path: catalogs/{categoryId}.json
         Task task;
         task.type = CatalogUpload;
-        task.videoId = -1;
+        task.mediaId = -1;
         task.inputPath = m_tempCatalogPath;
         task.bucket = bucket;
-        task.key = "videos/catalog.json";
+        task.key = QString("catalogs/%1.json").arg(categoryId);
 
         m_uploadQueue.enqueue(task);
         startUploadTasks();
@@ -208,18 +207,22 @@ void UploadManager::uploadCatalogJson(const QString& bucket, const QList<VideoMe
     }
 }
 
-void UploadManager::deleteS3Bucket(const QString& bucket)
+void UploadManager::deleteFromS3(const QString& bucket, const QString& categoryId)
 {
+    // Delete media files for this category
+    // Note: In the new structure, media files are shared, so we need to be careful
+    // This function now deletes the catalog file for this category
     Task task;
     task.type = S3Delete;
-    task.videoId = -1;
+    task.mediaId = -1;
     task.bucket = bucket;
+    task.categoryId = categoryId;
 
     m_uploadQueue.enqueue(task);
     startUploadTasks();
 }
 
-void UploadManager::removeCategoryAndUpload(const QString& bucket)
+void UploadManager::removeCategoryAndUpload(const QString& bucket, const QString& categoryId)
 {
     // Read existing categories
     QString categoriesPath = Settings::instance().projectsDir() + "/../categories.json";
@@ -234,11 +237,11 @@ void UploadManager::removeCategoryAndUpload(const QString& bucket)
         }
     }
 
-    // Remove the category with matching bucket
+    // Remove the category with matching id
     QJsonArray newCategories;
     for (int i = 0; i < categories.size(); ++i) {
         QJsonObject cat = categories[i].toObject();
-        if (cat["bucket"].toString() != bucket) {
+        if (cat["id"].toString() != categoryId) {
             newCategories.append(cat);
         }
     }
@@ -260,14 +263,12 @@ void UploadManager::removeCategoryAndUpload(const QString& bucket)
         tempFile.write(doc.toJson(QJsonDocument::Indented));
         tempFile.close();
 
-        // Queue upload task to categories bucket
-        QString categoriesBucket = Settings::instance().categoriesBucket();
-
+        // Queue upload task to same bucket
         Task task;
         task.type = CategoriesUpload;
-        task.videoId = -1;
+        task.mediaId = -1;
         task.inputPath = m_tempCategoriesPath;
-        task.bucket = categoriesBucket;
+        task.bucket = bucket;
         task.key = "categories.json";
 
         m_uploadQueue.enqueue(task);
@@ -325,24 +326,38 @@ void UploadManager::startScaleTasks()
 
         m_runningScales[process] = task;
 
-        emit scaleStarted(task.videoId);
-
-        // Build ffmpeg command
-        QString vf = QString("scale=%1:%2:force_original_aspect_ratio=increase,crop=%1:%2")
-            .arg(task.targetWidth)
-            .arg(task.targetHeight);
+        emit scaleStarted(task.mediaId);
 
         QStringList args;
-        args << "-y"
-             << "-i" << task.inputPath
-             << "-an"
-             << "-vf" << vf
-             << "-c:v" << "libx264"
-             << "-preset" << task.preset
-             << "-crf" << QString::number(task.crf)
-             << "-pix_fmt" << "yuv420p"
-             << "-movflags" << "+faststart"
-             << task.outputPath;
+
+        if (task.mediaType == MediaType::Image) {
+            // Image scaling with ffmpeg
+            QString vf = QString("scale=%1:%2:force_original_aspect_ratio=increase,crop=%1:%2")
+                .arg(task.targetWidth)
+                .arg(task.targetHeight);
+
+            args << "-y"
+                 << "-i" << task.inputPath
+                 << "-vf" << vf
+                 << "-q:v" << "2"  // High quality JPEG
+                 << task.outputPath;
+        } else {
+            // Video scaling with ffmpeg
+            QString vf = QString("scale=%1:%2:force_original_aspect_ratio=increase,crop=%1:%2")
+                .arg(task.targetWidth)
+                .arg(task.targetHeight);
+
+            args << "-y"
+                 << "-i" << task.inputPath
+                 << "-an"
+                 << "-vf" << vf
+                 << "-c:v" << "libx264"
+                 << "-preset" << task.preset
+                 << "-crf" << QString::number(task.crf)
+                 << "-pix_fmt" << "yuv420p"
+                 << "-movflags" << "+faststart"
+                 << task.outputPath;
+        }
 
         process->start("ffmpeg", args);
     }
@@ -363,16 +378,16 @@ void UploadManager::startUploadTasks()
         m_runningUploads[process] = task;
 
         if (task.type == Upload) {
-            emit uploadStarted(task.videoId);
+            emit uploadStarted(task.mediaId);
         }
 
         QStringList args;
         QString profile = Settings::instance().awsProfile();
 
         if (task.type == S3Delete) {
-            // Delete all objects in bucket: aws s3 rm s3://bucket --recursive
-            QString s3Path = QString("s3://%1").arg(task.bucket);
-            args << "s3" << "rm" << s3Path << "--recursive";
+            // Delete catalog file for this category
+            QString s3Path = QString("s3://%1/catalogs/%2.json").arg(task.bucket, task.categoryId);
+            args << "s3" << "rm" << s3Path;
         } else {
             // Upload file: aws s3 cp local s3://bucket/key
             QString s3Path = QString("s3://%1/%2").arg(task.bucket, task.key);
@@ -399,9 +414,9 @@ void UploadManager::onScaleProcessFinished(int exitCode, QProcess::ExitStatus st
 
     if (status != QProcess::NormalExit || exitCode != 0) {
         QString error = errorOutput.isEmpty() ? QString("Exit code: %1").arg(exitCode) : errorOutput;
-        emit scaleError(task.videoId, error);
+        emit scaleError(task.mediaId, error);
     } else {
-        emit scaleCompleted(task.videoId, task.outputPath);
+        emit scaleCompleted(task.mediaId, task.outputPath);
     }
 
     // Start more tasks if available
@@ -435,7 +450,7 @@ void UploadManager::onScaleProcessError(QProcess::ProcessError error)
             break;
     }
 
-    emit scaleError(task.videoId, errorMsg);
+    emit scaleError(task.mediaId, errorMsg);
 
     startScaleTasks();
 
@@ -459,7 +474,7 @@ void UploadManager::onUploadProcessFinished(int exitCode, QProcess::ExitStatus s
         QString error = errorOutput.isEmpty() ? QString("Exit code: %1").arg(exitCode) : errorOutput;
 
         if (task.type == Upload) {
-            emit uploadError(task.videoId, error);
+            emit uploadError(task.mediaId, error);
         } else if (task.type == IndexUpload || task.type == CatalogUpload) {
             emit indexUploadError(error);
         } else if (task.type == CategoriesUpload) {
@@ -469,7 +484,7 @@ void UploadManager::onUploadProcessFinished(int exitCode, QProcess::ExitStatus s
         }
     } else {
         if (task.type == Upload) {
-            emit uploadCompleted(task.videoId);
+            emit uploadCompleted(task.mediaId);
         } else if (task.type == IndexUpload) {
             // Clean up temp file after successful index upload
             if (!m_tempIndexPath.isEmpty()) {
@@ -528,7 +543,7 @@ void UploadManager::onUploadProcessError(QProcess::ProcessError error)
     }
 
     if (task.type == Upload) {
-        emit uploadError(task.videoId, errorMsg);
+        emit uploadError(task.mediaId, errorMsg);
     } else if (task.type == IndexUpload || task.type == CatalogUpload) {
         emit indexUploadError(errorMsg);
     } else if (task.type == CategoriesUpload) {

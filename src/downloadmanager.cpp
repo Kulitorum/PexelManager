@@ -7,10 +7,10 @@ DownloadManager::DownloadManager(QObject* parent)
 {
 }
 
-void DownloadManager::downloadVideo(int videoId, const QUrl& url, const QString& destPath)
+void DownloadManager::downloadMedia(int mediaId, const QUrl& url, const QString& destPath)
 {
     DownloadTask task;
-    task.videoId = videoId;
+    task.mediaId = mediaId;
     task.url = url;
     task.destPath = destPath;
 
@@ -49,7 +49,7 @@ void DownloadManager::startDownloads()
 
         // Check if file already exists
         if (QFile::exists(task.destPath)) {
-            emit downloadCompleted(task.videoId, task.destPath);
+            emit downloadCompleted(task.mediaId, task.destPath);
             continue;  // Try next in queue
         }
 
@@ -57,13 +57,13 @@ void DownloadManager::startDownloads()
         QString tempPath = task.destPath + ".part";
         QFile* file = new QFile(tempPath);
         if (!file->open(QIODevice::WriteOnly)) {
-            emit downloadError(task.videoId,
+            emit downloadError(task.mediaId,
                 QString("Cannot create file: %1").arg(tempPath));
             delete file;
             continue;  // Try next in queue
         }
 
-        emit downloadStarted(task.videoId);
+        emit downloadStarted(task.mediaId);
 
         QNetworkRequest request(task.url);
         request.setRawHeader("User-Agent", "PexelManager/1.0");
@@ -100,7 +100,7 @@ void DownloadManager::onDownloadProgress(qint64 received, qint64 total)
     auto reply = qobject_cast<QNetworkReply*>(sender());
     if (!reply || !m_activeDownloads.contains(reply)) return;
 
-    emit downloadProgress(m_activeDownloads[reply].task.videoId, received, total);
+    emit downloadProgress(m_activeDownloads[reply].task.mediaId, received, total);
 }
 
 void DownloadManager::onDownloadFinished()
@@ -124,16 +124,16 @@ void DownloadManager::onDownloadFinished()
             QFile::remove(tempPath);
         }
         if (reply->error() != QNetworkReply::OperationCanceledError) {
-            emit downloadError(download.task.videoId,
+            emit downloadError(download.task.mediaId,
                 QString("Download failed: %1").arg(reply->errorString()));
         }
     } else {
         // Rename temp file to final
         QFile::remove(download.task.destPath);  // Remove if exists
         if (QFile::rename(tempPath, download.task.destPath)) {
-            emit downloadCompleted(download.task.videoId, download.task.destPath);
+            emit downloadCompleted(download.task.mediaId, download.task.destPath);
         } else {
-            emit downloadError(download.task.videoId, "Failed to rename downloaded file");
+            emit downloadError(download.task.mediaId, "Failed to rename downloaded file");
         }
     }
 

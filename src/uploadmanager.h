@@ -4,7 +4,7 @@
 #include <QProcess>
 #include <QQueue>
 #include <QMap>
-#include "videometadata.h"
+#include "mediametadata.h"
 
 class UploadManager : public QObject
 {
@@ -13,14 +13,14 @@ class UploadManager : public QObject
 public:
     explicit UploadManager(QObject* parent = nullptr);
 
-    void scaleVideo(int videoId, const QString& inputPath, const QString& outputPath,
+    void scaleMedia(int mediaId, MediaType type, const QString& inputPath, const QString& outputPath,
                     int targetWidth, int targetHeight, int crf, const QString& preset);
-    void uploadToS3(int videoId, const QString& localPath, const QString& bucket, const QString& key);
-    void uploadIndexJson(const QString& bucket, const QString& projectName);
-    void uploadCatalogJson(const QString& bucket, const QList<VideoMetadata>& videos);
-    void uploadCategoriesJson(const QString& bucket, const QString& projectName);
-    void deleteS3Bucket(const QString& bucket);
-    void removeCategoryAndUpload(const QString& bucket);
+    void uploadToS3(int mediaId, const QString& localPath, const QString& bucket, const QString& key);
+    void uploadIndexJson(const QString& bucket, const QString& categoryId, const QString& projectName);
+    void uploadCatalogJson(const QString& bucket, const QString& categoryId, const QList<MediaMetadata>& media);
+    void uploadCategoriesJson(const QString& bucket, const QString& categoryId, const QString& projectName);
+    void deleteFromS3(const QString& bucket, const QString& categoryId);
+    void removeCategoryAndUpload(const QString& bucket, const QString& categoryId);
     void cancelAll();
 
     bool isBusy() const { return !m_runningScales.isEmpty() || !m_runningUploads.isEmpty() || !m_scaleQueue.isEmpty() || !m_uploadQueue.isEmpty(); }
@@ -29,13 +29,13 @@ public:
     static const int MAX_CONCURRENT_UPLOADS = 8;
 
 signals:
-    void scaleStarted(int videoId);
-    void scaleCompleted(int videoId, const QString& outputPath);
-    void scaleError(int videoId, const QString& error);
+    void scaleStarted(int mediaId);
+    void scaleCompleted(int mediaId, const QString& outputPath);
+    void scaleError(int mediaId, const QString& error);
 
-    void uploadStarted(int videoId);
-    void uploadCompleted(int videoId);
-    void uploadError(int videoId, const QString& error);
+    void uploadStarted(int mediaId);
+    void uploadCompleted(int mediaId);
+    void uploadError(int mediaId, const QString& error);
 
     void indexUploadCompleted();
     void indexUploadError(const QString& error);
@@ -62,11 +62,13 @@ private:
 
     struct Task {
         TaskType type;
-        int videoId;
+        MediaType mediaType = MediaType::Video;
+        int mediaId;
         QString inputPath;
         QString outputPath;
         QString bucket;
         QString key;
+        QString categoryId;
         QString projectName;
         int targetWidth;
         int targetHeight;

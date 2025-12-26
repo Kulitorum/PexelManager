@@ -21,7 +21,7 @@ ProjectManager::ProjectManager(QObject* parent)
 {
 }
 
-bool ProjectManager::createProject(const QString& name, const QString& s3Bucket)
+bool ProjectManager::createProject(const QString& name, const QString& categoryId)
 {
     QString projectsDir = Settings::instance().projectsDir();
     QString projectPath = projectsDir + "/" + name;
@@ -42,7 +42,8 @@ bool ProjectManager::createProject(const QString& name, const QString& s3Bucket)
     m_project = Project();
     m_project.name = name;
     m_project.path = projectPath;
-    m_project.s3Bucket = s3Bucket;
+    m_project.s3Bucket = Settings::instance().s3Bucket();
+    m_project.categoryId = categoryId;
 
     saveProject();
 
@@ -72,9 +73,48 @@ bool ProjectManager::loadProject(const QString& path)
     m_project = Project();
     m_project.name = root["name"].toString();
     m_project.path = path;
-    m_project.s3Bucket = root["s3_bucket"].toString();
     m_project.searchQuery = root["search_query"].toString();
     m_project.minDuration = root["min_duration"].toInt(30);
+
+    // Check format version (v2 = new format, v1/missing = old format)
+    int version = root["version"].toInt(1);
+
+    if (version >= 2) {
+        // New format
+        m_project.s3Bucket = root["s3_bucket"].toString();
+        if (m_project.s3Bucket.isEmpty()) {
+            m_project.s3Bucket = Settings::instance().s3Bucket();
+        }
+        m_project.categoryId = root["category_id"].toString();
+
+        // Load media
+        QJsonArray mediaArray = root["media"].toArray();
+        for (const auto& m : mediaArray) {
+            auto item = MediaMetadata::fromJson(m.toObject());
+            m_project.media.append(item);
+        }
+    } else {
+        // Old format - migrate
+        QString oldBucket = root["s3_bucket"].toString();
+
+        // Extract categoryId from old bucket name (e.g., "decent-de1-espresso" -> "espresso")
+        if (oldBucket.startsWith("decent-de1-")) {
+            m_project.categoryId = oldBucket.mid(11);
+        } else {
+            m_project.categoryId = oldBucket;
+        }
+
+        // Use new single bucket
+        m_project.s3Bucket = Settings::instance().s3Bucket();
+
+        // Load videos array (old format) and set type to Video
+        QJsonArray videosArray = root["videos"].toArray();
+        for (const auto& v : videosArray) {
+            auto item = MediaMetadata::fromJson(v.toObject());
+            item.type = MediaType::Video;  // Old projects only had videos
+            m_project.media.append(item);
+        }
+    }
 
     // Load rejected IDs
     QJsonArray rejectedArray = root["rejected_ids"].toArray();
@@ -82,12 +122,14 @@ bool ProjectManager::loadProject(const QString& path)
         m_project.rejectedIds.insert(id.toInt());
     }
 
-    // Load videos
-    QJsonArray videosArray = root["videos"].toArray();
-    for (const auto& v : videosArray) {
-        auto video = VideoMetadata::fromJson(v.toObject());
-        video.isRejected = m_project.rejectedIds.contains(video.id);
-        m_project.videos.append(video);
+    // Apply rejection status to media items
+    for (auto& item : m_project.media) {
+        item.isRejected = m_project.rejectedIds.contains(item.id);
+    }
+
+    // If migrated from old format, save in new format
+    if (version < 2) {
+        saveProject();
     }
 
     Settings::instance().setLastProjectPath(path);
@@ -103,8 +145,10 @@ bool ProjectManager::saveProject()
     }
 
     QJsonObject root;
+    root["version"] = 2;
     root["name"] = m_project.name;
     root["s3_bucket"] = m_project.s3Bucket;
+    root["category_id"] = m_project.categoryId;
     root["search_query"] = m_project.searchQuery;
     root["min_duration"] = m_project.minDuration;
 
@@ -115,12 +159,12 @@ bool ProjectManager::saveProject()
     }
     root["rejected_ids"] = rejectedArray;
 
-    // Save videos
-    QJsonArray videosArray;
-    for (const auto& video : m_project.videos) {
-        videosArray.append(video.toJson());
+    // Save media
+    QJsonArray mediaArray;
+    for (const auto& item : m_project.media) {
+        mediaArray.append(item.toJson());
     }
-    root["videos"] = videosArray;
+    root["media"] = mediaArray;
 
     QString projectFile = m_project.path + "/project.json";
     QFile file(projectFile);
@@ -163,13 +207,13 @@ bool ProjectManager::deleteProject(const QString& path)
     return dir.removeRecursively();
 }
 
-void ProjectManager::addVideos(const QList<VideoMetadata>& videos)
+void ProjectManager::addMedia(const QList<MediaMetadata>& items)
 {
-    for (auto video : videos) {
+    for (auto item : items) {
         // Skip if already exists
         bool exists = false;
-        for (const auto& v : m_project.videos) {
-            if (v.id == video.id) {
+        for (const auto& m : m_project.media) {
+            if (m.id == item.id) {
                 exists = true;
                 break;
             }
@@ -177,37 +221,37 @@ void ProjectManager::addVideos(const QList<VideoMetadata>& videos)
         if (exists) continue;
 
         // Check if previously rejected
-        video.isRejected = m_project.rejectedIds.contains(video.id);
-        m_project.videos.append(video);
+        item.isRejected = m_project.rejectedIds.contains(item.id);
+        m_project.media.append(item);
     }
 
-    emit videosChanged();
+    emit mediaChanged();
 }
 
-void ProjectManager::rejectVideo(int id)
+void ProjectManager::rejectMedia(int id)
 {
     m_project.rejectedIds.insert(id);
 
-    for (auto& video : m_project.videos) {
-        if (video.id == id) {
-            video.isRejected = true;
+    for (auto& item : m_project.media) {
+        if (item.id == id) {
+            item.isRejected = true;
             break;
         }
     }
 
-    emit videosChanged();
+    emit mediaChanged();
 }
 
-void ProjectManager::updateVideo(const VideoMetadata& video)
+void ProjectManager::updateMedia(const MediaMetadata& item)
 {
-    for (int i = 0; i < m_project.videos.size(); ++i) {
-        if (m_project.videos[i].id == video.id) {
-            m_project.videos[i] = video;
+    for (int i = 0; i < m_project.media.size(); ++i) {
+        if (m_project.media[i].id == item.id) {
+            m_project.media[i] = item;
             break;
         }
     }
 
-    emit videosChanged();
+    emit mediaChanged();
 }
 
 QStringList ProjectManager::availableProjects()

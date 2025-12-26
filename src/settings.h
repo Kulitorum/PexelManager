@@ -22,10 +22,7 @@ public:
     QString s3Bucket() const;
     void setS3Bucket(const QString& bucket);
 
-    QString categoriesBucket() const;
-    void setCategoriesBucket(const QString& bucket);
-
-    // Video settings
+    // Media settings
     int maxDownloadWidth() const;
     void setMaxDownloadWidth(int width);
 

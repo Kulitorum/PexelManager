@@ -48,7 +48,7 @@ void Settings::setAwsProfile(const QString& profile)
 
 QString Settings::s3Bucket() const
 {
-    return m_settings.value("aws/bucket").toString();
+    return m_settings.value("aws/bucket", "decent-de1-media").toString();
 }
 
 void Settings::setS3Bucket(const QString& bucket)
@@ -57,69 +57,58 @@ void Settings::setS3Bucket(const QString& bucket)
     emit settingsChanged();
 }
 
-QString Settings::categoriesBucket() const
-{
-    return m_settings.value("aws/categories_bucket", "decent-de1-categories").toString();
-}
-
-void Settings::setCategoriesBucket(const QString& bucket)
-{
-    m_settings.setValue("aws/categories_bucket", bucket);
-    emit settingsChanged();
-}
-
 int Settings::maxDownloadWidth() const
 {
-    return m_settings.value("video/max_download_width", 1920).toInt();
+    return m_settings.value("media/max_download_width", 1920).toInt();
 }
 
 void Settings::setMaxDownloadWidth(int width)
 {
-    m_settings.setValue("video/max_download_width", width);
+    m_settings.setValue("media/max_download_width", width);
     emit settingsChanged();
 }
 
 int Settings::targetWidth() const
 {
-    return m_settings.value("video/target_width", 1280).toInt();
+    return m_settings.value("media/target_width", 1280).toInt();
 }
 
 void Settings::setTargetWidth(int width)
 {
-    m_settings.setValue("video/target_width", width);
+    m_settings.setValue("media/target_width", width);
     emit settingsChanged();
 }
 
 int Settings::targetHeight() const
 {
-    return m_settings.value("video/target_height", 800).toInt();
+    return m_settings.value("media/target_height", 800).toInt();
 }
 
 void Settings::setTargetHeight(int height)
 {
-    m_settings.setValue("video/target_height", height);
+    m_settings.setValue("media/target_height", height);
     emit settingsChanged();
 }
 
 int Settings::ffmpegCrf() const
 {
-    return m_settings.value("video/crf", 22).toInt();
+    return m_settings.value("media/crf", 22).toInt();
 }
 
 void Settings::setFfmpegCrf(int crf)
 {
-    m_settings.setValue("video/crf", crf);
+    m_settings.setValue("media/crf", crf);
     emit settingsChanged();
 }
 
 QString Settings::ffmpegPreset() const
 {
-    return m_settings.value("video/preset", "slow").toString();
+    return m_settings.value("media/preset", "slow").toString();
 }
 
 void Settings::setFfmpegPreset(const QString& preset)
 {
-    m_settings.setValue("video/preset", preset);
+    m_settings.setValue("media/preset", preset);
     emit settingsChanged();
 }
 

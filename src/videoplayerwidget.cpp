@@ -2,6 +2,8 @@
 #include <QVBoxLayout>
 #include <QHBoxLayout>
 #include <QDebug>
+#include <QNetworkReply>
+#include <QPixmap>
 
 VideoPlayerWidget::VideoPlayerWidget(QWidget* parent)
     : QWidget(parent)
@@ -14,10 +16,21 @@ void VideoPlayerWidget::setupUi()
     auto layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
-    // Video widget
+    // Stacked widget for video/image
+    m_stack = new QStackedWidget(this);
+    m_stack->setMinimumSize(320, 200);
+    layout->addWidget(m_stack, 1);
+
+    // Video widget (index 0)
     m_videoWidget = new QVideoWidget(this);
-    m_videoWidget->setMinimumSize(320, 200);
-    layout->addWidget(m_videoWidget, 1);
+    m_stack->addWidget(m_videoWidget);
+
+    // Image label (index 1)
+    m_imageLabel = new QLabel(this);
+    m_imageLabel->setAlignment(Qt::AlignCenter);
+    m_imageLabel->setScaledContents(false);
+    m_imageLabel->setStyleSheet("background-color: black;");
+    m_stack->addWidget(m_imageLabel);
 
     // Player setup
     m_player = new QMediaPlayer(this);
@@ -25,6 +38,11 @@ void VideoPlayerWidget::setupUi()
     m_audioOutput->setVolume(0.5);
     m_player->setAudioOutput(m_audioOutput);
     m_player->setVideoOutput(m_videoWidget);
+
+    // Controls widget (to hide for images)
+    m_controlsWidget = new QWidget(this);
+    auto controlsMainLayout = new QVBoxLayout(m_controlsWidget);
+    controlsMainLayout->setContentsMargins(0, 0, 0, 0);
 
     // Controls layout
     auto controlsLayout = new QHBoxLayout;
@@ -41,7 +59,7 @@ void VideoPlayerWidget::setupUi()
     m_timeLabel->setFixedWidth(100);
     controlsLayout->addWidget(m_timeLabel);
 
-    layout->addLayout(controlsLayout);
+    controlsMainLayout->addLayout(controlsLayout);
 
     // Speed control layout
     auto speedLayout = new QHBoxLayout;
@@ -60,7 +78,9 @@ void VideoPlayerWidget::setupUi()
 
     speedLayout->addStretch();
 
-    layout->addLayout(speedLayout);
+    controlsMainLayout->addLayout(speedLayout);
+
+    layout->addWidget(m_controlsWidget);
 
     // Connections
     connect(m_player, &QMediaPlayer::positionChanged, this, &VideoPlayerWidget::onPositionChanged);
@@ -83,6 +103,7 @@ void VideoPlayerWidget::setupUi()
 void VideoPlayerWidget::playUrl(const QUrl& url)
 {
     qDebug() << "VideoPlayerWidget::playUrl" << url;
+    showVideoMode();
     m_player->setSource(url);
     m_player->play();
 }
@@ -90,14 +111,76 @@ void VideoPlayerWidget::playUrl(const QUrl& url)
 void VideoPlayerWidget::playFile(const QString& path)
 {
     qDebug() << "VideoPlayerWidget::playFile" << path;
+    showVideoMode();
     m_player->setSource(QUrl::fromLocalFile(path));
     m_player->play();
+}
+
+void VideoPlayerWidget::showImageUrl(const QUrl& url)
+{
+    qDebug() << "VideoPlayerWidget::showImageUrl" << url;
+    m_player->stop();
+    showImageMode();
+    m_imageLabel->setText("Loading...");
+
+    QNetworkRequest request(url);
+    request.setRawHeader("User-Agent", "PexelManager/1.0");
+    auto reply = m_imageNetwork.get(request);
+    connect(reply, &QNetworkReply::finished, this, &VideoPlayerWidget::onImageLoaded);
+}
+
+void VideoPlayerWidget::showImageFile(const QString& path)
+{
+    qDebug() << "VideoPlayerWidget::showImageFile" << path;
+    m_player->stop();
+    showImageMode();
+
+    QPixmap pixmap(path);
+    if (!pixmap.isNull()) {
+        m_imageLabel->setPixmap(pixmap.scaled(m_imageLabel->size(),
+            Qt::KeepAspectRatio, Qt::SmoothTransformation));
+    } else {
+        m_imageLabel->setText("Failed to load image");
+    }
 }
 
 void VideoPlayerWidget::stop()
 {
     m_player->stop();
     m_player->setSource(QUrl());
+    m_imageLabel->clear();
+}
+
+void VideoPlayerWidget::showVideoMode()
+{
+    m_stack->setCurrentIndex(0);
+    m_controlsWidget->show();
+}
+
+void VideoPlayerWidget::showImageMode()
+{
+    m_stack->setCurrentIndex(1);
+    m_controlsWidget->hide();
+}
+
+void VideoPlayerWidget::onImageLoaded()
+{
+    auto reply = qobject_cast<QNetworkReply*>(sender());
+    if (!reply) return;
+
+    if (reply->error() == QNetworkReply::NoError) {
+        QPixmap pixmap;
+        if (pixmap.loadFromData(reply->readAll())) {
+            m_imageLabel->setPixmap(pixmap.scaled(m_imageLabel->size(),
+                Qt::KeepAspectRatio, Qt::SmoothTransformation));
+        } else {
+            m_imageLabel->setText("Failed to decode image");
+        }
+    } else {
+        m_imageLabel->setText("Failed to load: " + reply->errorString());
+    }
+
+    reply->deleteLater();
 }
 
 qreal VideoPlayerWidget::playbackRate() const

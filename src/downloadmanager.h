@@ -14,7 +14,7 @@ class DownloadManager : public QObject
 public:
     explicit DownloadManager(QObject* parent = nullptr);
 
-    void downloadVideo(int videoId, const QUrl& url, const QString& destPath);
+    void downloadMedia(int mediaId, const QUrl& url, const QString& destPath);
     void cancelAll();
 
     bool isDownloading() const { return !m_activeDownloads.isEmpty() || !m_queue.isEmpty(); }
@@ -23,10 +23,10 @@ public:
     static const int MAX_CONCURRENT_DOWNLOADS = 8;
 
 signals:
-    void downloadStarted(int videoId);
-    void downloadProgress(int videoId, qint64 received, qint64 total);
-    void downloadCompleted(int videoId, const QString& path);
-    void downloadError(int videoId, const QString& error);
+    void downloadStarted(int mediaId);
+    void downloadProgress(int mediaId, qint64 received, qint64 total);
+    void downloadCompleted(int mediaId, const QString& path);
+    void downloadError(int mediaId, const QString& error);
     void allDownloadsCompleted();
 
 private slots:
@@ -37,7 +37,7 @@ private:
     void startDownloads();
 
     struct DownloadTask {
-        int videoId;
+        int mediaId;
         QUrl url;
         QString destPath;
     };
